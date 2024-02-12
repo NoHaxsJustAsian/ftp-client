@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+import os
+import socket
+import sys
+import argparse
+from urllib.parse import urlparse
+
+def parse_ftp_url(ftp_url):
+    parsed = urlparse(ftp_url)
+    if not parsed.scheme == 'ftp':
+        raise ValueError("URL should have 'ftp' as scheme")
+    # Extracting user and password
+    username = parsed.username
+    password = parsed.password
+    # Extracting host and port
+    host = parsed.hostname
+    port = parsed.port or 21  # Default FTP port is 21
+    # Extracting path
+    path = parsed.path
+    return {
+        'username': username,
+        'password': password,
+        'host': host,
+        'port': port,
+        'path': path
+    }
+
+# parse an FTP response into an array of [code, explanation, param]
+def parse_ftp_response(response):
+    # Split the response
+    parts = response.split(' ', 2)  # Split at most 2 times
+    # Extract components
+    code = parts[0]
+    explanation = parts[1] if len(parts) > 1 else ""
+    param = parts[2] if len(parts) > 2 else ""
+    # Removing the trailing '\r\n'
+    param = param.strip()
+    return {
+        'code': code,
+        'explanation': explanation,
+        'param': param
+    }
+
+def classify_response_code(code):
+    # Convert code to string if it's an integer
+    if isinstance(code, int):
+        code = str(code)
+    # Check the first character of the code
+    first_digit = code[0]
+    if first_digit == '1':
+        return "1"
+    elif first_digit == '2':
+        return "2"
+    elif first_digit == '3':
+        return "3"
+    elif first_digit in ['4', '5', '6']:
+        return "456"
+    else:
+        return "?"
+    
+class FTPClient:
+    def __init__(self, host, port=21):
+        self.host = host
+        self.port = port
+        self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.data_socket = None
+        
+    # Connect to the control socket
+    def connect(self):
+        self.control_socket.connect((self.host, self.port))
+        return self.read_response()
+    
+    # Connect to the data socket
+    def connect_data(self, host, port):
+        self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.data_socket.connect((host, port))
+        return self.read_response()
+
+    # Send a command to the server
+    def send_command(self, command):
+        self.control_socket.sendall(f"{command}\r\n".encode())
+        return self.read_response()
+    
+    # Send a data command to the server
+    def send_data_command(self, command):
+        self.data_socket.sendall(command.encode('utf-8') + b'\r\n')
+        return self.read_response()
+
+    # Read the response from the server
+    def read_response(self):
+        return self.control_socket.recv(4096).decode('utf-8')
+
+    # Send the username to the server
+    def user(self, username):
+        return self.send_command(f"USER {username}")
+    
+    # Send the password to the server
+    def password(self, password):
+        return self.send_command(f"PASS {password}")
+
+    # Create a directory on the server
+    def mkdir(self, dirname):
+        return self.send_command(f"MKD {dirname}")
+
+    # Remove a directory from the server
+    def rmdir(self, dirname):
+        return self.send_command(f"RMD {dirname}")
+
+    # Set binary transfer mode to be file structure
+    def set_binary_mode(self):
+        return self.send_command(f"TYPE I")
+    
+    # Set stream transfer mode to be file structure
+    def set_stream_mode(self):
+        return self.send_command(f"MODE S")
+
+    # Set file transfer mode to be file structure
+    def set_file_mode(self):
+        return self.send_command(f"STRU F")
+    
+    # List the contents of a directory
+    def ls(self, path):
+        self.pasv()
+        self.send_command(f"LIST {path}")
+        data = self.read_data()
+        self.read_response()
+        return data
+    
+    # Remove a file from the server
+    def rm(self, path):
+        return self.send_command(f"DELE {path}")
+    
+    # Download a file from the server
+    def retr(self, path):
+        return self.send_command(f"RETR {path}")
+    
+    # Upload a file to the server
+    def stor(self, path):
+        self.control_socket.sendall(f"STOR {path}\r\n".encode())
+    
+    def parse_pasv_response(self, response):
+        # Extract the numbers from the response
+        numbers = list(map(int, response.split("(")[1].split(")")[0].split(",")))
+        ip = ".".join(map(str, numbers[0:4]))
+        port = numbers[4] * 256 + numbers[5]
+        return ip, port
+
+    def pasv(self):
+        response = self.send_command("PASV")
+        ip, port = self.parse_pasv_response(response)
+        self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.data_socket.connect((ip, port))
+
+    def read_data(self):
+        chunks = []
+        while True:
+            chunk = self.data_socket.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        self.data_socket.close()
+        return b"".join(chunks)
+    
+    def download_file(self, remote_path, local_path):
+        self.pasv()
+        self.retr(remote_path)
+        with open(local_path, "wb") as file:
+            file.write(self.read_data())
+        self.read_response()
+
+    def upload_file(self, local_path, remote_path):
+        self.pasv()
+        with open(local_path, "rb") as file:
+            self.stor(remote_path)
+            self.data_socket.sendall(file.read())
+        self.data_socket.close()
+        return self.read_response()
+
+    def close(self):
+        self.send_command(f"QUIT")
+        self.control_socket.close()
+
+def main(operation, param1, param2):
+    parseTest1 = urlparse(param1)
+    parseTest2 = urlparse(param2)
+    parsed = ""
+    path1 = ""
+    path2 = ""
+    pathFTP = ""
+    ftp = 0
+    if(parseTest1.scheme == 'ftp'):
+        parsed = urlparse(param1)
+        ftp = 1
+
+    elif(parseTest2.scheme == 'ftp'):
+        parsed = urlparse(param2)
+        ftp = 2
+
+    
+    username = "anonymous"
+    password = ""
+    host = "ftp://ftp.3700.network"
+    port = "21"
+    path = ""
+    if(parsed.scheme == 'ftp'):
+        if ftp == 1:
+            parsed_data = parse_ftp_url(param1)
+            
+            path1 = parsed_data['path']
+            pathFTP = parsed_data['path']
+            path2 = param2
+        elif ftp == 2:
+            parsed_data = parse_ftp_url(param2)
+            path2 = parsed_data['path']
+            pathFTP = parsed_data['path']
+            path1 = param1
+        username = parsed_data['username']
+        password = parsed_data['password']
+        host = parsed_data['host']
+        port = parsed_data['port']
+        
+    else:
+        print("not a valid ftp url")
+        print(host)
+        print("Usage: ./3700ftp [operation] [param1] [param2]")
+
+    client = FTPClient(host, int(port))
+    response = client.connect()
+    response_data = parse_ftp_response(response)
+    if(classify_response_code(response_data["code"]) == "456"):
+        print("Error: invalid host or port")
+
+    response = client.user(username)
+    response_data = parse_ftp_response(response)
+    if(classify_response_code(response_data["code"]) == "456"):
+        print("Error: invalid username")
+    
+    # if there is a password, .ie not anonymous, send the password
+    if(classify_response_code(response_data["code"]) == "3"):
+        response = client.password(password)
+        response_data = parse_ftp_response(response)
+        if(classify_response_code(response_data["code"]) == "456"):
+            print("Error: invalid password")
+
+    response = client.set_binary_mode()
+    
+    response_data = parse_ftp_response(response)
+    if(classify_response_code(response_data["code"]) == "456"):
+        print("Error: Binary mode failed")
+
+    if operation == "mkdir":
+        # Create a directory using the path
+        response = client.mkdir(pathFTP)
+        print(response)
+
+    elif operation == "rmdir":
+        # Remove a directory using path
+        response = client.rmdir(pathFTP)
+        print(response)
+
+    elif operation == "ls":
+        # List the contents of a directory using param1 as directory name
+        print(path)
+        print(client.ls(path).decode())
+
+    elif operation == "cp":
+        client.set_file_mode()
+        if ftp == 1:
+            response = client.download_file(path1, path2)
+
+        elif ftp == 2:
+            response = client.upload_file(path1, path2)
+        
+
+    elif operation == "rm":
+        response = client.rm(pathFTP)
+        print(response)
+
+    else:
+        print("Unknown operation: {operation}")
+    client.close()
+
+
+# Commands Line Arguments to run program
+if __name__ == "__main__":
+    args = sys.argv[1:]
+
+    if len(args) < 2:
+        print("Usage: ./3700ftp [operation] [param1] [param2]")
+        sys.exit(1)
+
+    operation = args[0]
+    param1 = args[1]
+    
+    #param2 check
+    param2 = args[2] if len(args) > 2 else None
+
+    main(operation, param1, param2)
